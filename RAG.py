@@ -1,62 +1,44 @@
-# =============================================================================
-# 0. ENVIRONMENT SETUP — MUST BE BEFORE ALL LANGCHAIN/LANGGRAPH IMPORTS
-# =============================================================================
 from dotenv import load_dotenv
 load_dotenv()
 
 import os
 import json
+import time
+from pathlib import Path
 from typing import Literal, Annotated, TypedDict, Sequence
 
-# Fail fast if LangSmith is not configured
-if os.getenv("LANGCHAIN_TRACING_V2") != "true":
-    raise EnvironmentError("❌ Set LANGCHAIN_TRACING_V2=true in .env")
-if not os.getenv("LANGSMITH_API_KEY"): 
-    raise EnvironmentError("❌ Set LANGSMITH_API_KEY in .env")
+assert os.getenv("LANGCHAIN_TRACING_V2") == "true", "❌ Set LANGCHAIN_TRACING_V2=true in .env"
+assert os.getenv("LANGSMITH_API_KEY"), "❌ Set LANGSMITH_API_KEY in .env"
 
-# =============================================================================
-# 1. IMPORTS
-# =============================================================================
 from langgraph.graph import StateGraph, END, START
 from langgraph.graph.message import add_messages
 from langchain_ollama import ChatOllama
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.tools import DuckDuckGoSearchRun
+from langchain_community.document_loaders import WebBaseLoader
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from pypdf import PdfReader
 
-# =============================================================================
-# 2. COMPONENT INITIALIZATION
-# =============================================================================
-
-# Structured LLM for routing/grading (JSON mode)
 llm = ChatOllama(model="qwen3:8b", temperature=0, format="json")
-
-# Natural language LLM for generation
 llm_generator = ChatOllama(model="qwen3:8b", temperature=0.1)
 
-# Embeddings + Vector Store
 embeddings = HuggingFaceEmbeddings(
     model_name="sentence-transformers/all-MiniLM-L6-v2",
-    model_kwargs={"device": "cpu"},  # Change to "cuda" for GPU
+    model_kwargs={"device": "cpu"},
 )
+
 vectorstore = Chroma(
     collection_name="rag_knowledge_base",
     embedding_function=embeddings,
     persist_directory="./chroma_db",
 )
 
-# Web Search
 web_search = DuckDuckGoSearchRun()
-
-# Chunking
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
 
-# =============================================================================
-# 3. GRAPH STATE
-# =============================================================================
 
 class GraphState(TypedDict):
     question: str
@@ -68,12 +50,8 @@ class GraphState(TypedDict):
     grounded: str
     retry_count: int
 
-# =============================================================================
-# 4. NODES (each tagged for LangSmith filtering)
-# =============================================================================
 
 def analyze_query(state: GraphState) -> dict:
-    """Route question to vectorstore, web search, or direct answer."""
     print("🔍 [Node] Analyzing query...")
     prompt = f"""Analyze this question and decide the best source.
 Question: {state['question']}
@@ -97,7 +75,6 @@ Respond in JSON: {{"route": "vectorstore"}} OR {{"route": "web_search"}} OR {{"r
 
 
 def retrieve_from_vectorstore(state: GraphState) -> dict:
-    """Retrieve documents from ChromaDB."""
     print("📚 [Node] Retrieving from ChromaDB...")
     docs = vectorstore.similarity_search(state["question"], k=4)
     print(f"   → Retrieved {len(docs)} documents")
@@ -105,7 +82,6 @@ def retrieve_from_vectorstore(state: GraphState) -> dict:
 
 
 def search_web(state: GraphState) -> dict:
-    """Search DuckDuckGo and wrap results as Documents."""
     print("🌐 [Node] Searching DuckDuckGo...")
     raw_results = web_search.run(state["question"])
     docs = [Document(page_content=raw_results, metadata={"source": "duckduckgo"})]
@@ -114,7 +90,6 @@ def search_web(state: GraphState) -> dict:
 
 
 def grade_documents(state: GraphState) -> dict:
-    """Check if retrieved documents are relevant."""
     print("⚖️ [Node] Grading document relevance...")
     doc_text = "\n".join([d.page_content[:300] for d in state.get("documents", [])])
     prompt = f"""Are these documents relevant to answering the question?
@@ -137,7 +112,6 @@ Respond in JSON: {{"relevance": "yes"}} or {{"relevance": "no"}}"""
 
 
 def generate_answer(state: GraphState) -> dict:
-    """Generate grounded answer using Qwen3:8B."""
     print("✍️ [Node] Generating answer with Qwen3:8B...")
     context = "\n\n".join([d.page_content for d in state.get("documents", [])])
     system_msg = SystemMessage(
@@ -159,7 +133,6 @@ def generate_answer(state: GraphState) -> dict:
 
 
 def check_hallucination(state: GraphState) -> dict:
-    """Verify answer is grounded in documents."""
     print("🛡️ [Node] Checking hallucination...")
     context = "\n".join([d.page_content[:300] for d in state.get("documents", [])])
     prompt = f"""Is this answer fully supported by the context?
@@ -183,7 +156,6 @@ Respond in JSON: {{"grounded": "yes"}} or {{"grounded": "no"}}"""
 
 
 def generate_direct(state: GraphState) -> dict:
-    """Direct LLM response without retrieval."""
     print("💬 [Node] Direct LLM response (no retrieval)...")
     response = llm_generator.invoke(
         [HumanMessage(content=state["question"])],
@@ -196,9 +168,6 @@ def generate_direct(state: GraphState) -> dict:
         "grounded": "yes",
     }
 
-# =============================================================================
-# 5. CONDITIONAL EDGES
-# =============================================================================
 
 def route_after_analysis(state: GraphState) -> Literal["retrieve", "search_web", "generate_direct"]:
     if state["route"] == "web_search":
@@ -225,9 +194,6 @@ def route_after_hallucination_check(state: GraphState) -> Literal["end", "genera
         return "search_web"
     return "generate"
 
-# =============================================================================
-# 6. BUILD GRAPH
-# =============================================================================
 
 def build_rag_graph():
     workflow = StateGraph(GraphState)
@@ -251,22 +217,74 @@ def build_rag_graph():
 
     return workflow.compile()
 
-# =============================================================================
-# 7. DATA INGESTION HELPER
-# =============================================================================
 
 def ingest_texts(texts: list[str]):
-    """Ingest raw texts into ChromaDB."""
     chunks = text_splitter.create_documents(texts)
     vectorstore.add_documents(chunks)
-    print(f"✅ Ingested {len(chunks)} chunks into ChromaDB")
+    print(f"✅ Ingested {len(chunks)} text chunks into ChromaDB")
 
-# =============================================================================
-# 8. MAIN EXECUTION WITH LANGSMITH METADATA
-# =============================================================================
+
+def ingest_pdfs(pdf_paths: list[str]):
+    all_chunks = []
+    for pdf_path in pdf_paths:
+        path = Path(pdf_path)
+        if not path.exists():
+            print(f"⚠️ Skipping missing file: {pdf_path}")
+            continue
+
+        reader = PdfReader(str(path))
+        pages = []
+        for i, page in enumerate(reader.pages):
+            text = page.extract_text()
+            if text and text.strip():
+                pages.append(Document(
+                    page_content=text,
+                    metadata={"source": path.name, "page": i + 1}
+                ))
+
+        chunks = text_splitter.split_documents(pages)
+        all_chunks.extend(chunks)
+        print(f"   📄 {path.name}: {len(reader.pages)} pages → {len(chunks)} chunks")
+
+    if all_chunks:
+        vectorstore.add_documents(all_chunks)
+        print(f"✅ Ingested {len(all_chunks)} total PDF chunks into ChromaDB")
+    else:
+        print("⚠️ No extractable text found in provided PDFs")
+
+
+def ingest_urls(urls: list[str], delay: float = 2.0):
+    all_chunks = []
+    for url in urls:
+        try:
+            loader = WebBaseLoader(
+                web_paths=[url],
+                header_template={
+                    "User-Agent": "Mozilla/5.0 (RAG-Bot/1.0; +https://yourdomain.com)"
+                }
+            )
+            docs = loader.load()
+
+            for doc in docs:
+                doc.metadata["source"] = url
+
+            chunks = text_splitter.split_documents(docs)
+            all_chunks.extend(chunks)
+            print(f"   🌐 {url}: {len(docs)} pages → {len(chunks)} chunks")
+
+            time.sleep(delay)
+
+        except Exception as e:
+            print(f"⚠️ Failed to scrape {url}: {e}")
+
+    if all_chunks:
+        vectorstore.add_documents(all_chunks)
+        print(f"✅ Ingested {len(all_chunks)} total web article chunks into ChromaDB")
+    else:
+        print("⚠️ No extractable content from provided URLs")
+
 
 if __name__ == "__main__":
-    # Seed vector store
     sample_docs = [
         "LangGraph is a library for building stateful, multi-agent applications with LLMs. "
         "It extends LangChain with cyclic graph support and built-in persistence.",
@@ -279,15 +297,13 @@ if __name__ == "__main__":
     ]
     ingest_texts(sample_docs)
 
-    # Build graph
     app = build_rag_graph()
 
-    # Test queries covering all routes
     test_questions = [
-        "What is LangGraph and how does it differ from LangChain?",   # vectorstore
-        "What is the latest news about Qwen models in June 2026?",    # web_search
-        "Tell me about ChromaDB's architecture",                      # vectorstore
-        "Hello, how are you?",                                        # direct
+        "What is LangGraph and how does it differ from LangChain?",
+        "What is the latest news about Qwen models in June 2026?",
+        "Tell me about ChromaDB's architecture",
+        "Hello, how are you?",
     ]
 
     for q in test_questions:
