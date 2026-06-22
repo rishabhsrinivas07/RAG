@@ -1,16 +1,26 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+from dotenv import load_dotenv
+result = load_dotenv()
+print(f"✅ .env loaded: {result}")
+print(f"   LM_STUDIO_BASE_URL = {os.getenv('LM_STUDIO_BASE_URL', 'NOT SET')}")
+print(f"   TEXT_MODEL = {os.getenv('TEXT_MODEL', 'NOT SET')}")
+print(f"   OLLAMA_BASE_URL = {os.getenv('OLLAMA_BASE_URL', 'NOT SET')}")
+print(f"   VISION_MODEL = {os.getenv('VISION_MODEL', 'NOT SET')}")
+
 import os
 import json
 import time
 import re
+import base64
+from io import BytesIO
 from pathlib import Path
 from typing import Literal, Annotated, TypedDict, Sequence
 
 from langgraph.graph import StateGraph, END, START
 from langgraph.graph.message import add_messages
-from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.tools import DuckDuckGoSearchRun
@@ -20,11 +30,34 @@ from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pypdf import PdfReader
 from pdf2image import convert_from_path
-import pytesseract
 from PIL import Image
 
-llm = ChatOllama(model="qwen3:8b", temperature=0, format="json")
-llm_generator = ChatOllama(model="qwen3:8b", temperature=0.1)
+LM_STUDIO_BASE_URL = os.getenv("LM_STUDIO_BASE_URL", "http://192.168.1.42:1234/v1")
+TEXT_MODEL = os.getenv("TEXT_MODEL", "qwen/qwen3.5-9b")
+
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "hhttp://192.168.1.42:1234/v1")
+VISION_MODEL = os.getenv("VISION_MODEL", "qwen3-vl-30b-a3b-instruct")
+
+llm = ChatOpenAI(
+    model=TEXT_MODEL,
+    base_url=LM_STUDIO_BASE_URL,
+    api_key="lm-studio",
+    temperature=0,
+)
+
+llm_generator = ChatOpenAI(
+    model=TEXT_MODEL,
+    base_url=LM_STUDIO_BASE_URL,
+    api_key="lm-studio",
+    temperature=0.1,
+)
+
+vlm = ChatOpenAI(
+    model=VISION_MODEL,
+    base_url=OLLAMA_BASE_URL,
+    api_key="ollama",
+    temperature=0,
+)
 
 embeddings = HuggingFaceEmbeddings(
     model_name="sentence-transformers/all-MiniLM-L6-v2",
@@ -40,6 +73,7 @@ vectorstore = Chroma(
 web_search = DuckDuckGoSearchRun()
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
 
+
 class GraphState(TypedDict):
     question: str
     generation: str
@@ -49,6 +83,7 @@ class GraphState(TypedDict):
     relevance: str
     grounded: str
     retry_count: int
+
 
 def analyze_query(state: GraphState) -> dict:
     print("🔍 [Node] Analyzing query...")
@@ -72,11 +107,13 @@ Respond in JSON: {{"route": "vectorstore"}} OR {{"route": "web_search"}} OR {{"r
     print(f"   → Routed to: {route}")
     return {"route": route}
 
+
 def retrieve_from_vectorstore(state: GraphState) -> dict:
     print("📚 [Node] Retrieving from ChromaDB...")
     docs = vectorstore.similarity_search(state["question"], k=4)
     print(f"   → Retrieved {len(docs)} documents")
     return {"documents": docs}
+
 
 def search_web(state: GraphState) -> dict:
     print("🌐 [Node] Searching DuckDuckGo...")
@@ -84,6 +121,7 @@ def search_web(state: GraphState) -> dict:
     docs = [Document(page_content=raw_results, metadata={"source": "duckduckgo"})]
     print("   → Got web search results")
     return {"documents": docs}
+
 
 def grade_documents(state: GraphState) -> dict:
     print("⚖️ [Node] Grading document relevance...")
@@ -106,8 +144,9 @@ Respond in JSON: {{"relevance": "yes"}} or {{"relevance": "no"}}"""
     print(f"   → Relevance: {relevance}")
     return {"relevance": relevance}
 
+
 def generate_answer(state: GraphState) -> dict:
-    print("✍️ [Node] Generating answer with Qwen3:8B...")
+    print("✍️ [Node] Generating answer...")
     context = "\n\n".join([d.page_content for d in state.get("documents", [])])
     system_msg = SystemMessage(
         content="You are a helpful RAG assistant. Answer using ONLY the provided context. "
@@ -117,7 +156,7 @@ def generate_answer(state: GraphState) -> dict:
 
     response = llm_generator.invoke(
         [system_msg, user_msg],
-        config={"tags": ["generation", "qwen3-8b", "grounded-answer"]},
+        config={"tags": ["generation", "grounded-answer"]},
     )
 
     print(f"   → Generated response ({len(response.content)} chars)")
@@ -125,6 +164,7 @@ def generate_answer(state: GraphState) -> dict:
         "generation": response.content,
         "messages": [AIMessage(content=response.content)],
     }
+
 
 def check_hallucination(state: GraphState) -> dict:
     print("🛡️ [Node] Checking hallucination...")
@@ -148,6 +188,7 @@ Respond in JSON: {{"grounded": "yes"}} or {{"grounded": "no"}}"""
     print(f"   → Grounded: {grounded} (attempt {retry})")
     return {"grounded": grounded, "retry_count": retry}
 
+
 def generate_direct(state: GraphState) -> dict:
     print("💬 [Node] Direct LLM response (no retrieval)...")
     response = llm_generator.invoke(
@@ -161,6 +202,7 @@ def generate_direct(state: GraphState) -> dict:
         "grounded": "yes",
     }
 
+
 def end_no_answer(state: GraphState) -> dict:
     print("🛑 [Node] No relevant information found after retries.")
     fallback_message = "I'm sorry, but I couldn't find any relevant information to answer your question after searching both the knowledge base and the web."
@@ -169,6 +211,7 @@ def end_no_answer(state: GraphState) -> dict:
         "messages": [AIMessage(content=fallback_message)],
     }
 
+
 def route_after_analysis(state: GraphState) -> Literal["retrieve", "search_web", "generate_direct"]:
     if state["route"] == "web_search":
         return "search_web"
@@ -176,12 +219,16 @@ def route_after_analysis(state: GraphState) -> Literal["retrieve", "search_web",
         return "generate_direct"
     return "retrieve"
 
+
 def route_after_grading(state: GraphState) -> Literal["generate", "search_web", "end_no_answer"]:
     if state["relevance"] == "yes":
         return "generate"
+    if state.get("route") == "vectorstore":
+        return "end_no_answer"
     if state.get("retry_count", 0) < 1:
         return "search_web"
     return "end_no_answer"
+
 
 def route_after_hallucination_check(state: GraphState) -> Literal["generate", "search_web", "__end__"]:
     if state["grounded"] == "yes":
@@ -191,6 +238,7 @@ def route_after_hallucination_check(state: GraphState) -> Literal["generate", "s
     if state["route"] == "vectorstore":
         return "search_web"
     return "generate"
+
 
 def build_rag_graph():
     workflow = StateGraph(GraphState)
@@ -216,78 +264,152 @@ def build_rag_graph():
 
     return workflow.compile()
 
+
 def ingest_texts(texts: list[str]):
     chunks = text_splitter.create_documents(texts)
     vectorstore.add_documents(chunks)
     print(f"✅ Ingested {len(chunks)} text chunks into ChromaDB")
 
+
 def detect_table_or_chart(text: str, page) -> bool:
-    if len(page.images) > 0:
+    if hasattr(page, 'images') and len(page.images) > 0:
         return True
-    
+
     words = text.split()
     if not words:
         return False
-        
+
     num_count = sum(1 for w in words if re.match(r'^[\d\.\,\$\%\-\+]+$', w))
     num_ratio = num_count / len(words)
-    
+
     if num_ratio > 0.2 and len(words) > 15:
         return True
-        
+
     short_word_count = sum(1 for w in words if len(w) <= 3)
     short_ratio = short_word_count / len(words)
     if short_ratio > 0.6 and len(words) > 20:
         return True
-        
+
     return False
 
-def ingest_pdfs(pdf_paths: list[str], ocr_threshold: int = 50):
+
+def vlm_extract_text(image_source, source_name="image", max_retries=2):
+    if isinstance(image_source, (str, Path)):
+        with open(image_source, "rb") as f:
+            image_bytes = f.read()
+    elif isinstance(image_source, Image.Image):
+        buffered = BytesIO()
+        image_source.save(buffered, format="PNG")
+        image_bytes = buffered.getvalue()
+    else:
+        return ""
+
+    image_data = base64.b64encode(image_bytes).decode("utf-8")
+
+    prompt = (
+        "You are a precise document OCR engine. Extract ALL text from this image.\n"
+        "RULES:\n"
+        "- For tables: output valid Markdown tables with | separators and header rows\n"
+        "- For charts/graphs: describe axes, labels, data points, legends, and trends in plain text\n"
+        "- Preserve reading order (top-to-bottom, left-to-right)\n"
+        "- Do NOT add commentary, summaries, or conversational text\n"
+        "- Output ONLY the extracted content"
+    )
+
+    message = HumanMessage(
+        content=[
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_data}"}},
+        ]
+    )
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = vlm.invoke([message])
+            if response.content and len(response.content.strip()) > 20:
+                return response.content
+            print(f"⚠️ VLM returned empty/short response for {source_name} (attempt {attempt+1})")
+        except Exception as e:
+            print(f"⚠️ VLM extraction failed for {source_name} (attempt {attempt+1}): {e}")
+
+        if attempt < max_retries:
+            time.sleep(2)
+
+    print(f"❌ VLM extraction FAILED after {max_retries+1} attempts for {source_name}")
+    return ""
+
+
+def ingest_folder(root_folder: str, ocr_threshold: int = 50):
+    root_path = Path(root_folder).resolve()
+    if not root_path.exists() or not root_path.is_dir():
+        print(f"⚠️ Folder not found or not a directory: {root_folder}")
+        return
+
+    pdf_files = list(root_path.rglob("*.pdf"))
+
+    if not pdf_files:
+        print(f"⚠️ No PDF files found in {root_folder} or its subfolders.")
+        return
+
+    print(f"📂 Found {len(pdf_files)} PDF files in {root_folder}")
     all_chunks = []
-    for pdf_path in pdf_paths:
-        path = Path(pdf_path)
-        if not path.exists():
-            print(f"⚠️ Skipping missing file: {pdf_path}")
+
+    for pdf_path in pdf_files:
+        rel_dir = pdf_path.resolve().parent.relative_to(root_path)
+        folder_name = str(rel_dir) if str(rel_dir) != "." else root_path.name
+
+        try:
+            reader = PdfReader(str(pdf_path))
+        except Exception as e:
+            print(f"⚠️ Failed to read {pdf_path.name}: {e}")
             continue
 
-        reader = PdfReader(str(path))
         pages = []
         ocr_count = 0
-        
+
         for i, page in enumerate(reader.pages):
             text = page.extract_text() or ""
             extraction_method = "text"
-            
+
             force_ocr = False
             if len(text.strip()) < ocr_threshold:
                 force_ocr = True
             elif detect_table_or_chart(text, page):
                 force_ocr = True
-                print(f"   📊 Table/Chart detected on page {i+1}, forcing OCR...")
-            
+                print(f"   📊 Table/Chart detected on {pdf_path.name} page {i+1}, forcing VLM extraction...")
+
             if force_ocr:
                 try:
-                    images = convert_from_path(str(path), first_page=i + 1, last_page=i + 1, dpi=300)
-                    text = pytesseract.image_to_string(images[0])
-                    extraction_method = "ocr"
+                    images = convert_from_path(str(pdf_path), first_page=i + 1, last_page=i + 1, dpi=300)
+                    text = vlm_extract_text(images[0], source_name=f"{pdf_path.name} page {i+1}")
+                    extraction_method = "vlm_ocr"
                     ocr_count += 1
                 except Exception as e:
-                    print(f"⚠️ OCR failed for {path.name} page {i+1}: {e}")
+                    print(f"⚠️ VLM extraction failed for {pdf_path.name} page {i+1}: {e}")
                     text = ""
 
             if text and text.strip():
                 pages.append(Document(
                     page_content=text,
-                    metadata={"source": path.name, "page": i + 1, "extraction_method": extraction_method}
+                    metadata={
+                        "source": pdf_path.name,
+                        "page": i + 1,
+                        "extraction_method": extraction_method,
+                        "folder": folder_name
+                    }
                 ))
 
-        chunks = text_splitter.split_documents(pages)
-        all_chunks.extend(chunks)
-        print(f"   📄 {path.name}: {len(reader.pages)} pages → {len(chunks)} chunks ({ocr_count} via OCR)")
+        if pages:
+            chunks = text_splitter.split_documents(pages)
+            all_chunks.extend(chunks)
+            print(f"   📄 {pdf_path.name} (in {folder_name}): {len(reader.pages)} pages → {len(chunks)} chunks ({ocr_count} via VLM)")
 
     if all_chunks:
         vectorstore.add_documents(all_chunks)
-        print(f"✅ Ingested {len(all_chunks)} total PDF chunks into ChromaDB")
+        print(f"✅ Ingested {len(all_chunks)} total chunks from folder into ChromaDB")
+    else:
+        print("⚠️ No extractable text found in the provided folder.")
+
 
 def ingest_images(image_paths: list[str]):
     all_chunks = []
@@ -297,21 +419,18 @@ def ingest_images(image_paths: list[str]):
             print(f"⚠️ Skipping missing file: {img_path}")
             continue
 
-        try:
-            image = Image.open(str(path))
-            text = pytesseract.image_to_string(image)
+        text = vlm_extract_text(path, source_name=path.name)
 
-            if text and text.strip():
-                doc = Document(page_content=text, metadata={"source": path.name, "extraction_method": "ocr"})
-                chunks = text_splitter.split_documents([doc])
-                all_chunks.extend(chunks)
-                print(f"   🖼️ {path.name}: {len(chunks)} chunks via OCR")
-        except Exception as e:
-            print(f"⚠️ Failed to OCR {img_path}: {e}")
+        if text and text.strip():
+            doc = Document(page_content=text, metadata={"source": path.name, "extraction_method": "vlm_ocr"})
+            chunks = text_splitter.split_documents([doc])
+            all_chunks.extend(chunks)
+            print(f"   🖼️ {path.name}: {len(chunks)} chunks via VLM")
 
     if all_chunks:
         vectorstore.add_documents(all_chunks)
         print(f"✅ Ingested {len(all_chunks)} total image chunks into ChromaDB")
+
 
 def ingest_urls(urls: list[str], delay: float = 2.0):
     all_chunks = []
@@ -332,6 +451,7 @@ def ingest_urls(urls: list[str], delay: float = 2.0):
         vectorstore.add_documents(all_chunks)
         print(f"✅ Ingested {len(all_chunks)} total web article chunks into ChromaDB")
 
+
 if __name__ == "__main__":
     sample_docs = [
         "LangGraph is a library for building stateful, multi-agent applications with LLMs.",
@@ -341,24 +461,14 @@ if __name__ == "__main__":
     ]
     ingest_texts(sample_docs)
 
-    ingest_pdfs([
-        "/Users/rishabh/Pictures/Screenshots/pdf_tessaractrelevant.pdf",
-        "/Users/rishabh/Pictures/Screenshots/pdf_relevent not tessaract.pdf",
-        "/Users/rishabh/Pictures/Screenshots/pdf_tesseract.pdf",
-        "/Users/rishabh/Downloads/pdf_nontesseract.pdf"
-    ])
-    
-    ingest_images([
-        '/Users/rishabh/Pictures/Screenshots/Screenshot 2026-06-08 at 23.16.39.png', 
-        '/Users/rishabh/Pictures/Screenshots/Screenshot 2026-06-08 at 23.15.22.png'
-    ])
-    
-    ingest_urls(["https://blog.langchain.dev/langgraph-multi-agent-workflows/"])
+    ingest_folder("/media/ailab/New Volume/GRAPHRAG_GIT/RAG-master/")
+
+    ingest_images([])
 
     app = build_rag_graph()
 
     print("\n" + "="*60)
-    print("🤖 RAG Assistant Ready! (Powered by Qwen3:8B & Tesseract OCR)")
+    print("🤖 RAG Assistant Ready! (Powered by Qwen3.5 + Qwen3-VL)")
     print("Type your question and press Enter.")
     print("Type 'exit', 'quit', or 'q' to stop the program.")
     print("="*60)
@@ -372,7 +482,7 @@ if __name__ == "__main__":
 
         if not q:
             continue
-        
+
         if q.lower() in ["exit", "quit", "q"]:
             print("👋 Goodbye!")
             break
@@ -393,7 +503,8 @@ if __name__ == "__main__":
             config={
                 "metadata": {
                     "query_type": "adaptive_rag",
-                    "llm": "qwen3:8b",
+                    "llm": TEXT_MODEL,
+                    "vlm": VISION_MODEL,
                     "vectorstore": "chromadb",
                     "embedding_model": "all-MiniLM-L6-v2",
                     "search_backend": "duckduckgo",
