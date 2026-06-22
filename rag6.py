@@ -24,35 +24,32 @@ from pypdf import PdfReader
 from pdf2image import convert_from_path
 from PIL import Image
 
-#qwen4:9b
+VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-8B")
 
+VLM_BASE_URL = os.getenv("VLM_BASE_URL", "http://localhost:8001/v1")
+VLM_MODEL_NAME = os.getenv("VLM_MODEL_NAME", "Qwen/Qwen2.5-VL-7B-Instruct")
 
-OLLAMA_BASE_URL = "http://localhost:11434/v1"
-MODEL_NAME = "qwen3:8b" 
-VLM_MODEL_NAME = "minicpm-v" 
-
-    
 llm = ChatOpenAI(
     model=MODEL_NAME,
-    base_url=OLLAMA_BASE_URL,
-    api_key="ollama", # Ollama accepts any string here
+    base_url=VLLM_BASE_URL,
+    api_key="EMPTY",
     temperature=0,
 )
 
 llm_generator = ChatOpenAI(
     model=MODEL_NAME,
-    base_url=OLLAMA_BASE_URL,
-    api_key="ollama",
+    base_url=VLLM_BASE_URL,
+    api_key="EMPTY",
     temperature=0.1,
 )
 
 vlm = ChatOpenAI(
     model=VLM_MODEL_NAME,
-    base_url=OLLAMA_BASE_URL,
-    api_key="ollama",
+    base_url=VLM_BASE_URL,
+    api_key="EMPTY",
     temperature=0,
 )
-
 
 embeddings = HuggingFaceEmbeddings(
     model_name="sentence-transformers/all-MiniLM-L6-v2",
