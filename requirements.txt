@@ -23,3 +23,6 @@ Pillow>=10.0.0               # Image processing for standalone image files
 duckduckgo-search>=6.0.0     # Powers the web search tool
 beautifulsoup4>=4.12.0       # Parses HTML for WebBaseLoader
 requests>=2.31.0             # Handles HTTP requests for web scraping
+
+#App
+streamlit>=1.30.0
