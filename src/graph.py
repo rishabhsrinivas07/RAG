@@ -5,8 +5,7 @@ from langgraph.graph.message import add_messages
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
-# Import from same package (src)
-from src.config import llm, llm_generator, vectorstore, web_search, RETRIEVAL_K, MAX_HISTORY_MESSAGES
+from src.config import llm, llm_generator, vectorstore, RETRIEVAL_K, MAX_HISTORY_MESSAGES
 
 
 class GraphState(TypedDict):
@@ -22,12 +21,11 @@ class GraphState(TypedDict):
 
 def analyze_query(state: GraphState) -> dict:
     print("🔍 [Node] Analyzing query...")
-    # Always route to vectorstore in this simplified version
     return {"route": "vectorstore"}
 
 
 def retrieve_from_vectorstore(state: GraphState) -> dict:
-    print("📚 [Node] Retrieving from ChromaDB...")
+    print(" [Node] Retrieving from ChromaDB...")
     docs = vectorstore.similarity_search(state["question"], k=RETRIEVAL_K)
     print(f"   → Retrieved {len(docs)} documents")
     return {"documents": docs}
@@ -39,13 +37,9 @@ def grade_documents(state: GraphState) -> dict:
     prompt = f"""Are these documents relevant to answering the question?
 Question: {state['question']}
 Documents: {doc_text}
-
 Respond in JSON: {{"relevance": "yes"}} or {{"relevance": "no"}}"""
 
-    response = llm.invoke(
-        [HumanMessage(content=prompt)],
-        config={"tags": ["grading", "relevance-check"]},
-    )
+    response = llm.invoke([HumanMessage(content=prompt)], config={"tags": ["grading"]})
     try:
         relevance = json.loads(response.content)["relevance"]
     except Exception:
@@ -57,9 +51,8 @@ Respond in JSON: {{"relevance": "yes"}} or {{"relevance": "no"}}"""
 def generate_answer(state: GraphState) -> dict:
     print("✍️ [Node] Generating answer...")
 
-    # ✅ MEMORY MANAGEMENT: Trim to last N messages
+    # MEMORY MANAGEMENT: Sliding window truncation
     history = list(state.get("messages", []))
-    # Keep only the last MAX_HISTORY_MESSAGES (excluding the current question which is added fresh)
     trimmed_history = history[-MAX_HISTORY_MESSAGES:] if len(history) > MAX_HISTORY_MESSAGES else history
 
     context = "\n\n".join([d.page_content for d in state.get("documents", [])])
@@ -69,17 +62,13 @@ def generate_answer(state: GraphState) -> dict:
                 "If context is insufficient, say so. Never fabricate information."
     )
 
-    # Build message list: system + trimmed history + current context/question
     messages = [system_msg] + trimmed_history + [
         HumanMessage(content=f"Retrieved Context:\n{context}\n\nCurrent Question: {state['question']}")
     ]
 
-    response = llm_generator.invoke(
-        messages,
-        config={"tags": ["generation", "grounded-answer"]},
-    )
-
+    response = llm_generator.invoke(messages, config={"tags": ["generation"]})
     print(f"   → Generated response ({len(response.content)} chars) | History used: {len(trimmed_history)} msgs")
+    
     return {
         "generation": response.content,
         "messages": [AIMessage(content=response.content)],
@@ -92,13 +81,9 @@ def check_hallucination(state: GraphState) -> dict:
     prompt = f"""Is this answer fully supported by the context?
 Context: {context}
 Answer: {state['generation']}
-
 Respond in JSON: {{"grounded": "yes"}} or {{"grounded": "no"}}"""
 
-    response = llm.invoke(
-        [HumanMessage(content=prompt)],
-        config={"tags": ["grading", "hallucination-check"]},
-    )
+    response = llm.invoke([HumanMessage(content=prompt)], config={"tags": ["hallucination-check"]})
     try:
         grounded = json.loads(response.content)["grounded"]
     except Exception:

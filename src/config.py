@@ -1,5 +1,5 @@
-from dotenv import load_dotenv
 import os
+from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -9,16 +9,16 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 load_dotenv()
 
 # ============================================================
-# CONFIGURATION VARIABLES (Edit these to tune behavior)
+# CONFIGURATION VARIABLES
 # ============================================================
-MAX_HISTORY_MESSAGES = 5      # How many past messages to feed into LLM context
-RETRIEVAL_K = 4               # Number of chunks to retrieve from vectorstore
+MAX_HISTORY_MESSAGES = 5      # Sliding window size for LLM context
+RETRIEVAL_K = 4               # Number of chunks to retrieve
 CHUNK_SIZE = 500              # Characters per chunk
 CHUNK_OVERLAP = 50            # Overlap between chunks
 OCR_THRESHOLD = 50            # Min chars before forcing VLM OCR
 
 # ============================================================
-# SERVER ENDPOINTS
+# SERVER ENDPOINTS & MODELS
 # ============================================================
 LM_STUDIO_BASE_URL = os.getenv("LM_STUDIO_BASE_URL", "http://192.168.1.42:1234/v1")
 TEXT_MODEL = os.getenv("TEXT_MODEL", "qwen/qwen3.5-9b")
@@ -27,26 +27,9 @@ VISION_MODEL = os.getenv("VISION_MODEL", "qwen/qwen3.5-9b")
 # ============================================================
 # MODEL CLIENTS
 # ============================================================
-llm = ChatOpenAI(
-    model=TEXT_MODEL,
-    base_url=LM_STUDIO_BASE_URL,
-    api_key="lm-studio",
-    temperature=0,
-)
-
-llm_generator = ChatOpenAI(
-    model=TEXT_MODEL,
-    base_url=LM_STUDIO_BASE_URL,
-    api_key="lm-studio",
-    temperature=0.1,
-)
-
-vlm = ChatOpenAI(
-    model=VISION_MODEL,
-    base_url=LM_STUDIO_BASE_URL,
-    api_key="lm-studio",
-    temperature=0,
-)
+llm = ChatOpenAI(model=TEXT_MODEL, base_url=LM_STUDIO_BASE_URL, api_key="lm-studio", temperature=0)
+llm_generator = ChatOpenAI(model=TEXT_MODEL, base_url=LM_STUDIO_BASE_URL, api_key="lm-studio", temperature=0.1)
+vlm = ChatOpenAI(model=VISION_MODEL, base_url=LM_STUDIO_BASE_URL, api_key="lm-studio", temperature=0)
 
 # ============================================================
 # EMBEDDINGS & VECTORSTORE
@@ -66,7 +49,4 @@ vectorstore = Chroma(
 # TOOLS & UTILITIES
 # ============================================================
 web_search = DuckDuckGoSearchRun()
-text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=CHUNK_SIZE,
-    chunk_overlap=CHUNK_OVERLAP,
-)
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)

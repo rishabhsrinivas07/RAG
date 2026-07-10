@@ -1,6 +1,7 @@
 import re
 import base64
 import time
+import pandas as pd
 from io import BytesIO
 from pathlib import Path
 from pypdf import PdfReader
@@ -8,9 +9,8 @@ from pdf2image import convert_from_path
 from PIL import Image
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
-from langchain_community.document_loaders import WebBaseLoader
+from langchain_community.document_loaders import WebBaseLoader, DataFrameLoader, UnstructuredExcelLoader
 
-# Import from same package (src)
 from src.config import vectorstore, text_splitter, vlm
 
 
@@ -68,6 +68,35 @@ def vlm_extract_text(image_source, source_name="image", max_retries=2):
     return ""
 
 
+def load_excel_with_fallback(file_path: str) -> list[Document]:
+    try:
+        df = pd.read_excel(file_path)
+        if df.empty:
+            raise ValueError("DataFrame is empty.")
+        if df.shape == (1, 1) and len(str(df.iloc[0, 0])) > 500:
+            raise ValueError("Data looks like a single text blob, not a table.")
+
+        df = df.fillna("Unknown")
+        df['page_content'] = df.apply(
+            lambda row: ' | '.join(f"{col}: {val}" for col, val in row.items() if col != 'page_content'), 
+            axis=1
+        )
+        loader = DataFrameLoader(df, page_content_column="page_content")
+        documents = loader.load()
+        print(f"✅ Success: Loaded {len(documents)} documents using DataFrameLoader.")
+        return documents
+    except Exception as e:
+        print(f"⚠️ Pandas/DataFrameLoader failed ({e}). Falling back to Unstructured...")
+        try:
+            unstructured_loader = UnstructuredExcelLoader(file_path, mode="elements")
+            documents = unstructured_loader.load()
+            print(f"✅ Fallback Success: Loaded {len(documents)} elements using Unstructured.")
+            return documents
+        except Exception as unstruct_e:
+            print(f"❌ Critical Error: Unstructured also failed: {unstruct_e}")
+            return []
+
+
 def ingest_texts(texts: list[str]):
     chunks = text_splitter.create_documents(texts)
     vectorstore.add_documents(chunks)
@@ -85,13 +114,12 @@ def ingest_folder(root_folder: str, ocr_threshold: int = 50):
         print(f"⚠️ No PDFs found in {root_folder}")
         return
 
-    print(f"📂 Found {len(pdf_files)} PDFs")
+    print(f" Found {len(pdf_files)} PDFs")
     all_chunks = []
 
     for pdf_path in pdf_files:
         rel_dir = pdf_path.resolve().parent.relative_to(root_path)
         folder_name = str(rel_dir) if str(rel_dir) != "." else root_path.name
-
         try:
             reader = PdfReader(str(pdf_path))
         except Exception as e:
@@ -100,11 +128,9 @@ def ingest_folder(root_folder: str, ocr_threshold: int = 50):
 
         pages = []
         ocr_count = 0
-
         for i, page in enumerate(reader.pages):
             text = page.extract_text() or ""
             extraction_method = "text"
-
             force_ocr = len(text.strip()) < ocr_threshold or detect_table_or_chart(text, page)
 
             if force_ocr:
@@ -121,12 +147,7 @@ def ingest_folder(root_folder: str, ocr_threshold: int = 50):
             if text and text.strip():
                 pages.append(Document(
                     page_content=text,
-                    metadata={
-                        "source": pdf_path.name,
-                        "page": i + 1,
-                        "extraction_method": extraction_method,
-                        "folder": folder_name,
-                    }
+                    metadata={"source": pdf_path.name, "page": i + 1, "extraction_method": extraction_method, "folder": folder_name}
                 ))
 
         if pages:
@@ -139,12 +160,27 @@ def ingest_folder(root_folder: str, ocr_threshold: int = 50):
         print(f"✅ Total ingested: {len(all_chunks)} chunks")
 
 
+def ingest_excel(file_path: str):
+    path = Path(file_path)
+    if not path.exists():
+        print(f"⚠️ Skipping missing file: {file_path}")
+        return
+    print(f" Processing Excel file: {path.name}")
+    documents = load_excel_with_fallback(str(path))
+    if documents:
+        for doc in documents:
+            doc.metadata["source"] = path.name
+            doc.metadata["extraction_method"] = "excel"
+        chunks = text_splitter.split_documents(documents)
+        vectorstore.add_documents(chunks)
+        print(f"✅ Ingested {len(chunks)} chunks from {path.name}")
+
+
 def ingest_images(image_paths: list[str]):
     all_chunks = []
     for img_path in image_paths:
         path = Path(img_path)
-        if not path.exists():
-            continue
+        if not path.exists(): continue
         text = vlm_extract_text(path, source_name=path.name)
         if text and text.strip():
             doc = Document(page_content=text, metadata={"source": path.name, "extraction_method": "vlm_ocr"})
@@ -161,8 +197,7 @@ def ingest_urls(urls: list[str], delay: float = 2.0):
         try:
             loader = WebBaseLoader(web_paths=[url], header_template={"User-Agent": "Mozilla/5.0"})
             docs = loader.load()
-            for doc in docs:
-                doc.metadata["source"] = url
+            for doc in docs: doc.metadata["source"] = url
             chunks = text_splitter.split_documents(docs)
             all_chunks.extend(chunks)
             time.sleep(delay)
