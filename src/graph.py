@@ -25,7 +25,7 @@ def analyze_query(state: GraphState) -> dict:
 
 
 def retrieve_from_vectorstore(state: GraphState) -> dict:
-    print(" [Node] Retrieving from ChromaDB...")
+    print("📚 [Node] Retrieving from ChromaDB...")
     docs = vectorstore.similarity_search(state["question"], k=RETRIEVAL_K)
     print(f"   → Retrieved {len(docs)} documents")
     return {"documents": docs}
@@ -51,7 +51,6 @@ Respond in JSON: {{"relevance": "yes"}} or {{"relevance": "no"}}"""
 def generate_answer(state: GraphState) -> dict:
     print("✍️ [Node] Generating answer...")
 
-    # MEMORY MANAGEMENT: Sliding window truncation
     history = list(state.get("messages", []))
     trimmed_history = history[-MAX_HISTORY_MESSAGES:] if len(history) > MAX_HISTORY_MESSAGES else history
 
