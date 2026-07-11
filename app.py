@@ -98,21 +98,27 @@ with st.sidebar:
         else:
             st.error("Folder path does not exist.")
 
-    st.divider()
+        st.divider()
     st.subheader("Upload Excel File")
     uploaded_excel = st.file_uploader("Choose an .xlsx or .xls file", type=["xlsx", "xls"])
+    
     if uploaded_excel is not None:
         save_path = f"./data/{uploaded_excel.name}"
         os.makedirs("./data", exist_ok=True)
         with open(save_path, "wb") as f:
             f.write(uploaded_excel.getbuffer())
+            
         if st.button("📊 Ingest Excel", use_container_width=True):
             with st.spinner("Processing Excel file..."):
-                ingest_excel(save_path)
-            st.success(f"Successfully ingested {uploaded_excel.name}!")
-
-    st.divider()
-    st.caption(f"Memory: Last {MAX_HISTORY_MESSAGES} messages | Model: Qwen3.5-9B")
+                # Capture the number of chunks returned by the function
+                num_chunks = ingest_excel(save_path)
+            
+            # Display results directly in the Web UI
+            if num_chunks > 0:
+                st.success(f"Successfully ingested {uploaded_excel.name}!")
+                st.info(f"📊 **Extraction Details:** Extracted and embedded **{num_chunks} chunks** from the Excel file into the vector database.")
+            else:
+                st.error(f"❌ Failed to extract any data from {uploaded_excel.name}. Check the terminal for detailed error logs.")
 
 # ============================================================
 # MAIN CHAT INTERFACE
