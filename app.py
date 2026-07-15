@@ -2,6 +2,8 @@ import streamlit as st
 import sqlite3
 import uuid
 import os
+import logging
+logging.getLogger("streamlit.runtime.scriptrunner").setLevel(logging.ERROR)
 from datetime import datetime
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -9,6 +11,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from src.config import MAX_HISTORY_MESSAGES
 from src.ingestor import ingest_texts, ingest_folder, ingest_excel
 from src.graph import build_rag_graph
+
 
 # ============================================================
 # DATABASE & SESSION MANAGEMENT
