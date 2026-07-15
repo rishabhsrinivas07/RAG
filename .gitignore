@@ -19,6 +19,9 @@ testenv/
 chat_sessions.db
 extraction_log.txt
 
+
+*.xlsx
+*.pdf
 # macOS
 .DS_Store
 
