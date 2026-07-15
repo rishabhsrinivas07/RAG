@@ -1,6 +1,10 @@
 # Vector DB
 chroma_db/
 
+# SQLite temporary files
+*.db-shm
+*.db-wal
+
 # Data files
 data/*.pdf
 data/*.txt
