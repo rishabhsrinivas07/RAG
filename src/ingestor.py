@@ -11,6 +11,7 @@ from PIL import Image
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
 from langchain_community.document_loaders import WebBaseLoader, DataFrameLoader, UnstructuredExcelLoader
+from langchain_community.vectorstores.utils import filter_complex_metadata
 
 from src.config import vectorstore, text_splitter, vlm
 
@@ -138,7 +139,7 @@ def load_excel_with_fallback(file_path: str) -> list[Document]:
 def ingest_excel(file_path: str) -> int:
     path = Path(file_path)
     if not path.exists():
-        print(f"️ Skipping missing file: {file_path}", flush=True)
+        print(f"⚠️ Skipping missing file: {file_path}", flush=True)
         return 0
 
     print(f"📊 Processing Excel file: {path.name}", flush=True)
@@ -158,13 +159,16 @@ def ingest_excel(file_path: str) -> int:
             )
         
         chunks = text_splitter.split_documents(documents)
+        
+        # ✅ THE FIX: Automatically strip/convert datetime and other complex metadata
+        chunks = filter_complex_metadata(chunks)
+        
         vectorstore.add_documents(chunks)
         print(f"✅ Ingested {len(chunks)} chunks from {path.name}", flush=True)
         return len(chunks)
     else:
         print(f"⚠️ No documents extracted from {path.name}", flush=True)
         return 0
-
 
 # ==========================================================
 #  FOLDER (PDF) INGESTION
