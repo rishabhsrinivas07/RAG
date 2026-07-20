@@ -89,51 +89,94 @@ def vlm_extract_text(image_source, source_name="image", max_retries=2):
 
 
 # ==========================================================
-# 📊 EXCEL INGESTION
+# 📊 EXCEL INGESTION (UPGRADED FOR MULTI-SHEET & RAG)
 # ==========================================================
 def load_excel_with_fallback(file_path: str) -> list[Document]:
     """
-    Primary: Reads Excel via Pandas, converts to DataFrame, then to LangChain Documents.
-    Fallback: Uses UnstructuredExcelLoader if Pandas fails.
+    Reads ALL sheets in an Excel file. Formats each row into a 
+    context-rich string so the embedding model can understand it.
     """
     try:
-        df = pd.read_excel(file_path)
+        # Ensure the engine is available
+        import openpyxl 
         
-        # ✅ FIX: Convert all datetime columns to strings so ChromaDB doesn't crash
-        for col in df.select_dtypes(include=['datetime64[ns]']).columns:
-            df[col] = df[col].astype(str)
+        xls = pd.ExcelFile(file_path)
+        documents = []
+        
+        # ✅ FIX 1: Loop through EVERY sheet in the Excel file
+        for sheet_name in xls.sheet_names:
+            df = pd.read_excel(xls, sheet_name=sheet_name)
             
-        if df.empty:
-            raise ValueError("The Excel file is empty.")
-        if df.shape == (1, 1) and len(str(df.iloc[0, 0])) > 500:
-            raise ValueError("Data looks like a single text blob, not a table.")
+            # Clean data types to prevent ChromaDB crashes
+            df = df.fillna("N/A")
+            for col in df.select_dtypes(include=['datetime64[ns]']).columns:
+                df[col] = df[col].astype(str)
+                
+            if df.empty:
+                continue
 
-        df = df.fillna("Unknown")
-        
-        df['page_content'] = df.apply(
-            lambda row: ' | '.join(f"{col}: {val}" for col, val in row.items() if col != 'page_content'), 
-            axis=1
-        )
-
-        loader = DataFrameLoader(df, page_content_column="page_content")
-        documents = loader.load()
-        
-        print(f"✅ Success: Loaded {len(documents)} documents using Pandas + DataFrameLoader.", flush=True)
+            # ✅ FIX 2: Format rows so Embeddings understand them
+            for index, row in df.iterrows():
+                # Start with the sheet name for context
+                row_parts = [f"Sheet: {sheet_name}"]
+                
+                # Add non-empty columns as Key-Value pairs
+                for col in df.columns:
+                    val = row[col]
+                    if str(val).strip() and str(val) != "N/A":
+                        row_parts.append(f"{col}: {val}")
+                
+                # Example output: "Sheet: Q3_Sales | Region: US | Revenue: 4.2M | Growth: 12%"
+                row_text = " | ".join(row_parts)
+                
+                doc = Document(
+                    page_content=row_text,
+                    metadata={
+                        "source": Path(file_path).name, 
+                        "sheet": sheet_name, 
+                        "row_index": index + 1,
+                        "extraction_method": "excel_pandas"
+                    }
+                )
+                documents.append(doc)
+                
+        print(f"✅ Success: Loaded {len(documents)} rows across {len(xls.sheet_names)} sheets.", flush=True)
         return documents
 
+    except ImportError:
+        print("❌ Missing 'openpyxl'. Run: pip install openpyxl", flush=True)
+        return []
     except Exception as e:
-        print(f"⚠️ Pandas/DataFrameLoader failed ({e}). Falling back to Unstructured...", flush=True)
+        print(f"⚠️ Pandas failed ({e}). Excel file might be corrupted or heavily formatted.", flush=True)
+        return []
+
+
+def ingest_excel(file_path: str) -> int:
+    path = Path(file_path)
+    if not path.exists():
+        print(f"⚠️ Skipping missing file: {file_path}", flush=True)
+        return 0
+
+    print(f"📊 Processing Excel file: {path.name}", flush=True)
+    documents = load_excel_with_fallback(str(path))
+
+    if documents:
+        for doc in documents:
+            log_extraction(
+                text=doc.page_content,
+                source=path.name,
+                page_info=f"Sheet: {doc.metadata.get('sheet')} | Row: {doc.metadata.get('row_index')}",
+                method="excel"
+            )
         
-        try:
-            unstructured_loader = UnstructuredExcelLoader(file_path, mode="elements")
-            documents = unstructured_loader.load()
-            
-            print(f"✅ Fallback Success: Loaded {len(documents)} elements using UnstructuredExcelLoader.", flush=True)
-            return documents
-            
-        except Exception as unstruct_e:
-            print(f"❌ Critical Error: UnstructuredExcelLoader also failed: {unstruct_e}", flush=True)
-            return []
+        # Note: We DO NOT use text_splitter on Excel rows. 
+        # Each row is already a perfect, self-contained "chunk".
+        vectorstore.add_documents(documents)
+        print(f"✅ Ingested {len(documents)} rows from {path.name}", flush=True)
+        return len(documents)
+    else:
+        print(f"⚠️ No data extracted from {path.name}", flush=True)
+        return 0
 
 
 def ingest_excel(file_path: str) -> int:

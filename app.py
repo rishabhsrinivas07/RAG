@@ -1,61 +1,29 @@
 import streamlit as st
-import sqlite3
-import uuid
 import os
+import io
+import contextlib
 import logging
+
+# Suppress harmless Streamlit/Transformers warnings
 logging.getLogger("streamlit.runtime.scriptrunner").setLevel(logging.ERROR)
-from datetime import datetime
-from langchain_core.messages import HumanMessage
-from langgraph.checkpoint.sqlite import SqliteSaver
+logging.getLogger("transformers").setLevel(logging.ERROR)
 
-from src.config import MAX_HISTORY_MESSAGES
-from src.ingestor import ingest_texts, ingest_folder, ingest_excel
+from langchain_core.messages import HumanMessage, AIMessage
+
+# ✅ FIX 1: Removed LLM_BACKEND from this import
+from src.config import MAX_HISTORY_MESSAGES 
+from src.ingestor import ingest_folder, ingest_excel
 from src.graph import build_rag_graph
-
-
-# ============================================================
-# DATABASE & SESSION MANAGEMENT
-# ============================================================
-DB_PATH = "chat_sessions.db"
-
-def get_db_connection():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS ui_sessions (
-            thread_id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-    """)
-    conn.commit()
-    return conn
-
-def create_new_session(conn, title="New Chat"):
-    thread_id = f"session_{uuid.uuid4().hex[:8]}"
-    conn.execute("INSERT INTO ui_sessions (thread_id, title, created_at) VALUES (?, ?, ?)",
-                 (thread_id, title, datetime.now().isoformat()))
-    conn.commit()
-    return thread_id
-
-def get_all_sessions(conn):
-    return conn.execute("SELECT * FROM ui_sessions ORDER BY created_at DESC").fetchall()
-
-def delete_session(conn, thread_id):
-    conn.execute("DELETE FROM ui_sessions WHERE thread_id = ?", (thread_id,))
-    conn.commit()
 
 # ============================================================
 # STREAMLIT UI SETUP
 # ============================================================
 st.set_page_config(page_title="RAG Assistant", page_icon="🤖", layout="wide")
 
-conn = get_db_connection()
-memory = SqliteSaver(conn)
-app = build_rag_graph(checkpointer=memory)
+# Initialize the graph (No checkpointer needed since we manage memory manually)
+app = build_rag_graph()
 
-if "thread_id" not in st.session_state:
-    st.session_state.thread_id = create_new_session(conn, "Default Session")
+# Initialize session state for the singular chat history
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
@@ -64,30 +32,15 @@ if "chat_history" not in st.session_state:
 # ============================================================
 with st.sidebar:
     st.title("🤖 RAG Assistant")
-    st.header("💬 Sessions")
     
-    if st.button("➕ New Chat", use_container_width=True):
-        new_title = f"Session {len(get_all_sessions(conn)) + 1}"
-        st.session_state.thread_id = create_new_session(conn, new_title)
+    # ✅ FIX 2: Removed LLM_BACKEND from the caption
+    st.caption(f"Memory: Last {MAX_HISTORY_MESSAGES} msgs")
+    st.divider()
+    
+    st.header("⚙️ Chat Controls")
+    if st.button("🗑️ Clear Chat History", use_container_width=True):
         st.session_state.chat_history = []
         st.rerun()
-
-    sessions = get_all_sessions(conn)
-    for session in sessions:
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            if st.button(f"💬 {session['title']}", key=f"btn_{session['thread_id']}",
-                         use_container_width=True,
-                         type="primary" if session['thread_id'] == st.session_state.thread_id else "secondary"):
-                st.session_state.thread_id = session['thread_id']
-                st.session_state.chat_history = []
-                st.rerun()
-        with col2:
-            if st.button("🗑️", key=f"del_{session['thread_id']}"):
-                delete_session(conn, session['thread_id'])
-                if st.session_state.thread_id == session['thread_id']:
-                    st.session_state.thread_id = sessions[0]['thread_id'] if sessions else create_new_session(conn)
-                st.rerun()
 
     st.divider()
     st.header("📂 Data Ingestion")
@@ -101,7 +54,7 @@ with st.sidebar:
         else:
             st.error("Folder path does not exist.")
 
-        st.divider()
+    st.divider()
     st.subheader("Upload Excel File")
     uploaded_excel = st.file_uploader("Choose an .xlsx or .xls file", type=["xlsx", "xls"])
     
@@ -113,50 +66,76 @@ with st.sidebar:
             
         if st.button("📊 Ingest Excel", use_container_width=True):
             with st.spinner("Processing Excel file..."):
-                # Capture the number of chunks returned by the function
                 num_chunks = ingest_excel(save_path)
             
-            # Display results directly in the Web UI
             if num_chunks > 0:
                 st.success(f"Successfully ingested {uploaded_excel.name}!")
-                st.info(f"📊 **Extraction Details:** Extracted and embedded **{num_chunks} chunks** from the Excel file into the vector database.")
+                st.info(f"📊 **Extraction Details:** Extracted and embedded **{num_chunks} chunks**.")
             else:
-                st.error(f"❌ Failed to extract any data from {uploaded_excel.name}. Check the terminal for detailed error logs.")
+                st.error(f"❌ Failed to extract data from {uploaded_excel.name}.")
 
 # ============================================================
 # MAIN CHAT INTERFACE
 # ============================================================
-current_title = next((s['title'] for s in sessions if s['thread_id'] == st.session_state.thread_id), 'Unknown')
-st.header(f"Chat: {current_title}")
+st.header("💬 Chat with your Documents")
 
+# Display chat history
 for message in st.session_state.chat_history:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
+# Handle new user input
 if prompt := st.chat_input("Ask a question about your documents..."):
+    # 1. Add user message to history and display it
     st.session_state.chat_history.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
+    # 2. Generate assistant response
     with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
+        with st.spinner("🧠 Thinking & Processing..."):
+            
+            # 🎯 MAGIC: Capture all terminal print() statements during execution
+            log_capture = io.StringIO()
+            
             try:
-                result = app.invoke(
-                    {
-                        "question": prompt,
-                        "messages": [HumanMessage(content=prompt)],
-                        "documents": [], "generation": "", "route": "", 
-                        "relevance": "", "grounded": "", "retry_count": 0,
-                    },
-                    config={
-                        "configurable": {"thread_id": st.session_state.thread_id},
-                        "metadata": {"query_type": "streamlit_rag"}
-                    },
-                )
+                # 🧠 MEMORY HANDLING: Build the message history for LangGraph
+                langchain_messages = []
+                for msg in st.session_state.chat_history[-MAX_HISTORY_MESSAGES:]:
+                    if msg["role"] == "user":
+                        langchain_messages.append(HumanMessage(content=msg["content"]))
+                    elif msg["role"] == "assistant":
+                        langchain_messages.append(AIMessage(content=msg["content"]))
+
+                with contextlib.redirect_stdout(log_capture):
+                    result = app.invoke(
+                        {
+                            "question": prompt,
+                            "messages": langchain_messages, # Pass the sliding window of history
+                            "documents": [], "generation": "", "route": "", 
+                            "relevance": "", "grounded": "", "retry_count": 0,
+                        }
+                    )
+                
                 response_text = result.get("generation", "No response generated.")
+                logs = log_capture.getvalue()
+                
+                # 3. Display the captured background processes in an expander
+                if logs.strip():
+                    with st.expander("🔍 View Background Processes & Terminal Logs", expanded=True):
+                        st.code(logs, language="text")
+                
+                # 4. Display the final answer and save to history
                 st.markdown(response_text)
                 st.session_state.chat_history.append({"role": "assistant", "content": response_text})
+                
             except Exception as e:
                 error_msg = f"⚠️ Error: {str(e)}"
+                logs = log_capture.getvalue()
+                
+                if logs.strip():
+                    with st.expander("🔍 View Logs Before Crash", expanded=True):
+                        st.code(logs, language="text")
+                
                 st.error(error_msg)
                 st.session_state.chat_history.append({"role": "assistant", "content": error_msg})

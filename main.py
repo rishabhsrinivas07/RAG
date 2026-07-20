@@ -22,7 +22,7 @@ def run_ingestion():
     ]
     ingest_texts(sample_docs)
     # ingest_folder("./data/pdfs")
-    # ingest_excel("./data/sample.xlsx")
+    ingest_excel("/home/ailab/updated_sheet.xlsx")
     print("✅ Ingestion finished.\n")
 
 

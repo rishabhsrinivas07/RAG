@@ -12,10 +12,10 @@ load_dotenv()
 # CONFIGURATION VARIABLES
 # ============================================================
 MAX_HISTORY_MESSAGES = 5      # Sliding window size for LLM context
-RETRIEVAL_K = 4               # Number of chunks to retrieve
-CHUNK_SIZE = 500              # Characters per chunk
-CHUNK_OVERLAP = 50            # Overlap between chunks
-OCR_THRESHOLD = 50            # Min chars before forcing VLM OCR
+RETRIEVAL_K = 5              # Number of chunks to retrieve
+CHUNK_SIZE = 750              # Characters per chunk
+CHUNK_OVERLAP = 75            # Overlap between chunks
+OCR_THRESHOLD = 75            # Min chars before forcing VLM OCR
 
 # ============================================================
 # SERVER ENDPOINTS & MODELS
